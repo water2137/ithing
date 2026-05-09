@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 import System.Environment (getArgs, lookupEnv)
 import System.IO (hFlush, stdout, isEOF)
@@ -18,6 +19,8 @@ import Text.Parsec.String (Parser)
 import qualified Text.Parsec.Token as Tok
 import Text.Parsec.Language (emptyDef)
 
+import Read (readCompileTimeFile)
+
 licenseText :: String
 licenseText = "Copyright (C) 2026  water2137\n\n\
 \This program is free software; you can redistribute it and/or\n\
@@ -31,6 +34,9 @@ licenseText = "Copyright (C) 2026  water2137\n\n\
 \You should have received a copy of the GNU General Public License\n\
 \along with this program; if not, see\n\
 \<https://www.gnu.org/licenses/>.\n"
+
+stdlib :: String
+stdlib = $(readCompileTimeFile "it-std.txt")
 
 data Expr
     = Var String
@@ -176,14 +182,17 @@ fileParser = do
     eof
     return defs
 
-data ReplCmd = CmdAssign String Expr | CmdExpr Expr | CmdLoad String | CmdCD String | CmdShell String | CmdShowHelp | CmdShowDefs | CmdShowLicense | CmdDebug Expr | CmdChurch Expr | CmdNOP
+data ReplCmd = CmdAssign String Expr | CmdExpr Expr | CmdLoad String | CmdSave String | CmdLoadStd | CmdClear | CmdCD String | CmdShell String | CmdShowHelp | CmdShowDefs | CmdShowLicense | CmdDebug Expr | CmdChurch Expr | CmdNOP
 
 replParser :: Parser ReplCmd
 replParser = do
     whiteSpace
     (try (do char ':'; char 'l'; whiteSpace; path <- many1 (satisfy (not . isSpace)); whiteSpace; eof; return $ CmdLoad path)
+     <|> try (do char ':'; char 's'; whiteSpace; path <- many1 (satisfy (not . isSpace)); whiteSpace; eof; return $ CmdSave path)
+     <|> try (do char ':'; char 'S'; whiteSpace; eof; return CmdLoadStd)
      <|> try (do char ':'; char '!'; whiteSpace; cmd <- many anyChar; eof; return $ CmdShell cmd)
      <|> try (do char ':'; char 'c'; char 'd'; whiteSpace; path <- many1 (satisfy (not . isSpace)); whiteSpace; eof; return $ CmdCD path)
+     <|> try (do char ':'; char 'c'; whiteSpace; eof; return CmdClear)
      <|> try (do char ':'; char 'h'; whiteSpace; eof; return CmdShowHelp)
      <|> try (do char ':'; char 'd'; whiteSpace; eof; return CmdShowDefs)
      <|> try (do char ':'; char 'L'; whiteSpace; eof; return CmdShowLicense)
@@ -246,12 +255,15 @@ introText = "interpretthing, Copyright (C)  2026 water2137\n\
 \about the license, type `:L`\n"
 
 helpText :: String
-helpText = "builtins: :[!lhdLDC|cd]\nexample code: a = \\x -> x x\n              a a"
+helpText = "builtins: :[!lsShcdLDC|cd]\nexample code: a = \\x -> x x\n              a a"
 
 helpText2 :: String
-helpText2 = "builtins: :[!lhdLDC|cd]\n\
+helpText2 = "builtins: :[!lsShcdLDC|cd]\n\
 \! - shell escape\n\
 \l - load definitions file\n\
+\s - save definitions to file\n\
+\S - load standard library\n\
+\c - clear definitions\n\
 \h - hmmm idk what this does\n\
 \d - dump definitions\n\
 \L - license details\n\
@@ -287,6 +299,9 @@ runREPL = do
                     Right (CmdCD path) -> do
                         setCurrentDirectory path
                         return (Just currentEnv)
+                    Right CmdClear -> do
+                        putStrLn "cleared all definitions"
+                        return (Just [])
                     Right (CmdShell cmd) -> do
                         _ <- system cmd
                         return (Just currentEnv)
@@ -296,6 +311,17 @@ runREPL = do
                             Left err -> print err >> return (Just currentEnv)
                             Right defs -> do
                                 putStrLn $ "loaded " ++ show (length defs) ++ " definitions from " ++ path
+                                return (Just (reverse defs ++ currentEnv))
+                    Right (CmdSave path) -> do
+                        let content = concatMap (\(name, expr) -> name ++ " = " ++ show expr ++ "\n") (reverse currentEnv)
+                        writeFile path content
+                        putStrLn $ "saved " ++ show (length currentEnv) ++ " definitions to " ++ path
+                        return (Just currentEnv)
+                    Right CmdLoadStd -> do
+                        case parse fileParser "stdlib" stdlib of
+                            Left err -> print err >> return (Just currentEnv)
+                            Right defs -> do
+                                putStrLn $ "loaded " ++ show (length defs) ++ " definitions from standard library"
                                 return (Just (reverse defs ++ currentEnv))
                     Right (CmdAssign name val) -> do
                         putStrLn $ "defined " ++ name
