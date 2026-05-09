@@ -1,0 +1,105 @@
+-- the standard library for \interprething
+
+-- This program/library is separate from the interpreter itself
+-- THIS SPECIFIC FILE is licensed under 0BSD
+-- 0BSD text:
+-- Permission to use, copy, modify, and/or distribute this software for
+-- any purpose with or without fee is hereby granted.
+-- 
+-- THE SOFTWARE IS PROVIDED “AS IS” AND THE AUTHOR DISCLAIMS ALL
+-- WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES
+-- OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE
+-- FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY
+-- DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN
+-- AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
+-- OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+-- Basic Combinators
+id = (\x -> x)
+comp = (\f -> (\g -> (\x -> (f (g x)))))
+flip = (\f -> (\x -> (\y -> ((f y) x))))
+const = (\x -> (\y -> x))
+
+-- Booleans
+true = (\x -> (\y -> x))
+false = (\x -> (\y -> y))
+if = (\p -> (\t -> (\e -> ((p t) e))))
+and = (\p -> (\q -> ((p q) p)))
+or = (\p -> (\q -> ((p p) q)))
+not = (\p -> ((p false) true))
+xor = (\p -> (\q -> ((p (not q)) q)))
+
+-- Church Numerals
+zero = (\f -> (\x -> x))
+succ = (\n -> (\f -> (\x -> (f ((n f) x)))))
+one = (succ zero)
+two = (succ one)
+three = (succ two)
+four = ((plus two) two)
+five = (succ four)
+eight = ((mult two) four)
+nine = ((exp three) two)
+ten = (succ nine)
+
+-- Arithmetic
+plus = (\m -> (\n -> (\f -> (\x -> ((m f) ((n f) x))))))
+mult = (\m -> (\n -> (\f -> (m (n f)))))
+exp = (\m -> (\n -> (n m)))
+pred = (\n -> (\f -> (\x -> (((n (\g -> (\h -> (h (g f))))) (\u -> x)) (\u -> u)))))
+sub = (\m -> (\n -> ((n pred) m)))
+min = (\m -> (\n -> (((leq m) n) m n)))
+max = (\m -> (\n -> (((leq m) n) n m)))
+
+-- Comparison
+iszero = (\n -> ((n (\x -> false)) true))
+leq = (\m -> (\n -> (iszero ((sub m) n))))
+eq = (\m -> (\n -> ((and ((leq m) n)) ((leq n) m))))
+gt = (\m -> (\n -> (not ((leq m) n))))
+lt = (\m -> (\n -> (and ((leq m) n) (not ((eq m) n)))))
+
+-- Recursion (Y Combinator)
+y_comb = (\f -> ((\x -> (f (x x))) (\x -> (f (x x)))))
+
+-- Division & Modulo
+div = (y_comb (\r -> (\m -> (\n -> ((((leq n) m) (succ ((r ((sub m) n)) n))) zero)))))
+mod = (\m -> (\n -> ((sub m) ((mult n) ((div m) n)))))
+
+-- Pairs
+pair = (\x -> (\y_comb -> (\f -> ((f x) y_comb))))
+first = (\p -> (p true))
+second = (\p -> (p false))
+
+-- Lists
+nil = ((pair true) true)
+is_nil = first
+cons = (\h -> (\t -> ((pair false) ((pair h) t))))
+car = (\l -> (first (second l)))
+cdr = (\l -> (second (second l)))
+
+-- Advanced List Operations
+foldr = (y_comb (\f -> (\g -> (\z -> (\l -> (((is_nil l) z) ((g (car l)) (((f g) z) (cdr l)))))))))
+map = (\g -> (foldr (\x -> (\acc -> (cons (g x) acc))) nil))
+filter = (\p -> (foldr (\x -> (\acc -> (((p x) ((cons x) acc)) acc))) nil))
+length = (foldr (\x -> (\acc -> (succ acc))) zero)
+reverse = (\l -> (foldr (\x -> (\acc -> ((append acc) ((cons x) nil)))) nil l))
+append = (\l1 -> (\l2 -> (foldr cons l2 l1)))
+index = (\n -> (\l -> (car ((n cdr) l))))
+
+-- Quantifiers and Searches
+any = (\p -> (foldr (\x -> (\acc -> ((or (p x)) acc))) false))
+all = (\p -> (foldr (\x -> (\acc -> ((and (p x)) acc))) true))
+take = (y_comb (\f -> (\n -> (\l -> (((or (iszero n) (is_nil l)) nil) ((cons (car l)) ((f (pred n)) (cdr l))))))))
+
+-- List Generation
+range = (y_comb (\f -> (\m -> (\n -> (((gt m) n) nil ((cons m) ((f (succ m)) n)))))))
+
+-- Arithmetic on Lists
+sum_l = (foldr plus zero)
+product_l = (foldr mult one)
+
+-- Higher Math
+fact = (y_comb (\f -> (\n -> (((iszero n) one) ((mult n) (f (pred n)))))))
+fib = (y_comb (\f -> (\n -> ((((leq n) one) n) ((plus (f ((sub n) one))) (f ((sub n) two)))))))
+
+-- Evil
+ack = (y_comb (\f -> (\m -> (\n -> (((iszero m) (succ n)) (((iszero n) ((f (pred m)) one)) ((f (pred m)) ((f m) (pred n)))))))))
