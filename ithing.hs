@@ -188,13 +188,15 @@ fileParser = do
     eof
     return defs
 
-data ReplCmd = CmdAssign String Expr | CmdExpr Expr | CmdLoad String | CmdSave String | CmdLoadStd | CmdClear | CmdCD String | CmdShell String | CmdShowHelp | CmdShowDefs | CmdShowLicense | CmdDebug Expr | CmdChurch Expr | CmdNOP
+data ReplCmd = CmdAssign String Expr | CmdExpr Expr | CmdLoad String | CmdSave String | CmdLoadStd | CmdClear | CmdCD String | CmdShell String | CmdShowHelp | CmdShowDefs | CmdShowLicense | CmdDebug Expr | CmdChurch Expr | CmdRedirect String | CmdStopRedirect | CmdNOP
 
 replParser :: Parser ReplCmd
 replParser = do
     whiteSpace
     (try (do char ':'; char 'l'; whiteSpace; path <- many1 (satisfy (not . isSpace)); whiteSpace; eof; return $ CmdLoad path)
      <|> try (do char ':'; char 's'; whiteSpace; path <- many1 (satisfy (not . isSpace)); whiteSpace; eof; return $ CmdSave path)
+     <|> try (do char ':'; char 'r'; whiteSpace; path <- many1 (satisfy (not . isSpace)); whiteSpace; eof; return $ CmdRedirect path)
+     <|> try (do char ':'; char 'r'; whiteSpace; eof; return CmdStopRedirect)
      <|> try (do char ':'; char 'S'; whiteSpace; eof; return CmdLoadStd)
      <|> try (do char ':'; char '!'; whiteSpace; cmd <- many anyChar; eof; return $ CmdShell cmd)
      <|> try (do char ':'; char 'c'; char 'd'; whiteSpace; path <- many1 (satisfy (not . isSpace)); whiteSpace; eof; return $ CmdCD path)
@@ -261,13 +263,14 @@ introText = "interpretthing, Copyright (C)  2026 water2137\n\
 \about the license, type `:L`\n"
 
 helpText :: String
-helpText = "builtins: :[!lsShcdLDC|cd]\nexample code: a = \\x -> x x\n              a a"
+helpText = "builtins: :[!lsrShcdLDC|cd]\nexample code: a = \\x -> x x\n              a a"
 
 helpText2 :: String
-helpText2 = "builtins: :[!lsShcdLDC|cd]\n\
+helpText2 = "builtins: :[!lsrShcdLDC|cd]\n\
 \! - shell escape\n\
 \l - load definitions file\n\
 \s - save definitions to file\n\
+\r - redirect output to file (or :r to stop)\n\
 \S - load standard library\n\
 \c - clear definitions\n\
 \h - hmmm idk what this does\n\
@@ -281,87 +284,102 @@ helpText2 = "builtins: :[!lsShcdLDC|cd]\n\
 runREPL :: IO ()
 runREPL = do
     putStrLn (introText ++ helpText)
-    runInputT defaultSettings $ withInterrupt $ loop []
+    runInputT defaultSettings $ withInterrupt $ loop [] Nothing
   where
-    loop currentEnv = handleInterrupt (loop currentEnv) $ do
+    loop currentEnv maybeRedir = handleInterrupt (loop currentEnv maybeRedir) $ do
         minput <- getInputLine "> "
         case minput of
             Nothing -> return () -- Ctrl-D
-            Just "" -> loop currentEnv
+            Just "" -> loop currentEnv maybeRedir
             Just line -> do
-                result <- withInterrupt $ liftIO $ E.try $ case parse replParser "<stdin>" line of
-                    Left err -> print err >> return (Just currentEnv)
-                    Right CmdShowDefs -> do
-                        if null currentEnv
-                            then putStrLn "nothing defined"
-                            else mapM_ (\(name, expr) -> putStrLn $ name ++ " = " ++ show expr) (reverse currentEnv)
-                        return (Just currentEnv)
-                    Right CmdShowLicense -> do
-                        putStr licenseText
-                        return (Just currentEnv)
-                    Right (CmdShowHelp) -> do
-                        putStrLn helpText2
-                        return (Just currentEnv)
-                    Right (CmdCD path) -> do
-                        setCurrentDirectory path
-                        return (Just currentEnv)
-                    Right CmdClear -> do
-                        putStrLn "cleared all definitions"
-                        return (Just [])
-                    Right (CmdShell cmd) -> do
-                        _ <- system cmd
-                        return (Just currentEnv)
-                    Right (CmdLoad path) -> do
-                        content <- BL.readFile path
-                        case parse fileParser path (BL.unpack content) of
-                            Left err -> print err >> return (Just currentEnv)
-                            Right defs -> do
-                                putStrLn $ "loaded " ++ show (length defs) ++ " definitions from " ++ path
-                                return (Just (reverse defs ++ currentEnv))
-                    Right (CmdSave path) -> do
-                        let content = concatMap (\(name, expr) -> name ++ " = " ++ show expr ++ "\n") (reverse currentEnv)
-                        writeFile path content
-                        putStrLn $ "saved " ++ show (length currentEnv) ++ " definitions to " ++ path
-                        return (Just currentEnv)
-                    Right CmdLoadStd -> do
-                        case parse fileParser "stdlib" stdlib of
-                            Left err -> print err >> return (Just currentEnv)
-                            Right defs -> do
-                                putStrLn $ "loaded " ++ show (length defs) ++ " definitions from standard library"
-                                return (Just (reverse defs ++ currentEnv))
-                    Right (CmdAssign name val) -> do
-                        putStrLn $ "defined " ++ name
-                        return (Just ((name, val) : currentEnv))
-                    Right CmdNOP -> return (Just currentEnv)
-                    Right (CmdDebug e) -> do
-                        let loopSteps expr = do
-                                putStrLn $ "-> " ++ show expr
-                                case step currentEnv expr of
-                                    Nothing -> return ()
-                                    Just expr' -> loopSteps expr'
-                        loopSteps e
-                        return (Just currentEnv)
-                    Right (CmdChurch e) -> do
-                        let vEnv = [(k, VThunk v vEnv) | (k, v) <- currentEnv]
-                        let normalizedResult = normalize vEnv e
-                        putStrLn $ decode normalizedResult
-                        return (Just currentEnv)
-                    Right (CmdExpr e) -> do
-                        let vEnv = [(k, VThunk v vEnv) | (k, v) <- currentEnv]
-                        let normalizedResult = normalize vEnv e
-                        let expandedAst = expand vEnv e
-                        noColor <- liftIO $ lookupEnv "NO_COLOR"
-                        let (lb, rb) = case noColor of
-                                         Just _ -> ("[", "]")
-                                         Nothing -> ("\ESC[31m[\ESC[0m", "\ESC[31m]\ESC[0m")
-                        putStrLn $ show normalizedResult ++ " " ++ lb ++ show expandedAst ++ rb
-                        return (Just currentEnv)
+                result <- withInterrupt $ liftIO $ E.try $ do
+                    let putStrLn' s = case maybeRedir of
+                                        Nothing -> putStrLn s
+                                        Just path -> appendFile path (s ++ "\n")
+                    let putStr' s = case maybeRedir of
+                                        Nothing -> putStr s
+                                        Just path -> appendFile path s
+                    case parse replParser "<stdin>" line of
+                        Left err -> print err >> return (Just (currentEnv, maybeRedir))
+                        Right (CmdRedirect path) -> do
+                            writeFile path ""
+                            putStrLn $ "redirecting output to " ++ path
+                            return (Just (currentEnv, Just path))
+                        Right CmdStopRedirect -> do
+                            putStrLn "stopped redirection"
+                            return (Just (currentEnv, Nothing))
+                        Right CmdShowDefs -> do
+                            if null currentEnv
+                                then putStrLn' "nothing defined"
+                                else mapM_ (\(name, expr) -> putStrLn' $ name ++ " = " ++ show expr) (reverse currentEnv)
+                            return (Just (currentEnv, maybeRedir))
+                        Right CmdShowLicense -> do
+                            putStr' licenseText
+                            return (Just (currentEnv, maybeRedir))
+                        Right (CmdShowHelp) -> do
+                            putStrLn helpText2
+                            return (Just (currentEnv, maybeRedir))
+                        Right (CmdCD path) -> do
+                            setCurrentDirectory path
+                            return (Just (currentEnv, maybeRedir))
+                        Right CmdClear -> do
+                            putStrLn "cleared all definitions"
+                            return (Just ([], maybeRedir))
+                        Right (CmdShell cmd) -> do
+                            _ <- system cmd
+                            return (Just (currentEnv, maybeRedir))
+                        Right (CmdLoad path) -> do
+                            content <- BL.readFile path
+                            case parse fileParser path (BL.unpack content) of
+                                Left err -> print err >> return (Just (currentEnv, maybeRedir))
+                                Right defs -> do
+                                    putStrLn' $ "loaded " ++ show (length defs) ++ " definitions from " ++ path
+                                    return (Just (reverse defs ++ currentEnv, maybeRedir))
+                        Right (CmdSave path) -> do
+                            let content = concatMap (\(name, expr) -> name ++ " = " ++ show expr ++ "\n") (reverse currentEnv)
+                            writeFile path content
+                            putStrLn' $ "saved " ++ show (length currentEnv) ++ " definitions to " ++ path
+                            return (Just (currentEnv, maybeRedir))
+                        Right CmdLoadStd -> do
+                            case parse fileParser "stdlib" stdlib of
+                                Left err -> print err >> return (Just (currentEnv, maybeRedir))
+                                Right defs -> do
+                                    putStrLn' $ "loaded " ++ show (length defs) ++ " definitions from standard library"
+                                    return (Just (reverse defs ++ currentEnv, maybeRedir))
+                        Right (CmdAssign name val) -> do
+                            putStrLn' $ "defined " ++ name
+                            return (Just ((name, val) : currentEnv, maybeRedir))
+                        Right CmdNOP -> return (Just (currentEnv, maybeRedir))
+                        Right (CmdDebug e) -> do
+                            let loopSteps expr = do
+                                    putStrLn' $ "-> " ++ show expr
+                                    case step currentEnv expr of
+                                        Nothing -> return ()
+                                        Just expr' -> loopSteps expr'
+                            loopSteps e
+                            return (Just (currentEnv, maybeRedir))
+                        Right (CmdChurch e) -> do
+                            let vEnv = [(k, VThunk v vEnv) | (k, v) <- currentEnv]
+                            let normalizedResult = normalize vEnv e
+                            putStrLn' $ decode normalizedResult
+                            return (Just (currentEnv, maybeRedir))
+                        Right (CmdExpr e) -> do
+                            let vEnv = [(k, VThunk v vEnv) | (k, v) <- currentEnv]
+                            let normalizedResult = normalize vEnv e
+                            let expandedAst = expand vEnv e
+                            noColor <- liftIO $ lookupEnv "NO_COLOR"
+                            let (lb, rb) = case (noColor, maybeRedir) of
+                                             (Just _, _) -> ("[", "]")
+                                             (_, Just _) -> ("[", "]")
+                                             _           -> ("\ESC[31m[\ESC[0m", "\ESC[31m]\ESC[0m")
+                            putStrLn' $ show normalizedResult ++ " " ++ lb ++ show expandedAst ++ rb
+                            return (Just (currentEnv, maybeRedir))
 
                 case result of
                     Left (e :: E.SomeException) -> do
                         liftIO $ putStrLn $ "error: " ++ show e
-                        loop currentEnv
-                    Right (Just nextEnv) -> loop nextEnv
+                        loop currentEnv maybeRedir
+                    Right (Just (nextEnv, nextRedir)) -> loop nextEnv nextRedir
                     Right Nothing -> return ()
 
 main :: IO ()
