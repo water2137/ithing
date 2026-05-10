@@ -141,14 +141,20 @@ step env (App f a) =
                 Nothing -> App f <$> step env a
 step env (Lam x b) = Lam x <$> step env b
 
-lexer = Tok.makeTokenParser emptyDef { Tok.reservedOpNames = ["->", "\\", "="], Tok.commentLine = "--" }
+lexer = Tok.makeTokenParser emptyDef
+    { Tok.reservedOpNames = ["->", "\\", "="]
+    , Tok.reservedNames   = ["->", "\\", "="]
+    , Tok.commentLine     = "--"
+    , Tok.identStart      = alphaNum <|> oneOf "!#$%&*+./<=>?@^|-~_"
+    , Tok.identLetter     = alphaNum <|> oneOf "!#$%&*+./<=>?@^|-~_'"
+    }
 identifier = Tok.identifier lexer
 parens     = Tok.parens lexer
 reservedOp = Tok.reservedOp lexer
 whiteSpace = Tok.whiteSpace lexer
 
 atom :: Parser Expr
-atom = parens expr 
+atom = parens expr
    <|> lam
    <|> (try (Var <$> identifier <* notFollowedBy (reservedOp "=")))
 
@@ -226,7 +232,7 @@ isChurchList (Lam c (Lam n body)) | c /= n = go body
 isChurchList _ = Nothing
 
 decode :: Expr -> String
-decode e 
+decode e
     | Just n <- isChurchNumeral e = show n
     | Just b <- isChurchBool e = show b
     | Just l <- isChurchList e = "[" ++ intercalate ", " (map decode l) ++ "]"
@@ -286,7 +292,7 @@ runREPL = do
                 result <- withInterrupt $ liftIO $ E.try $ case parse replParser "<stdin>" line of
                     Left err -> print err >> return (Just currentEnv)
                     Right CmdShowDefs -> do
-                        if null currentEnv 
+                        if null currentEnv
                             then putStrLn "nothing defined"
                             else mapM_ (\(name, expr) -> putStrLn $ name ++ " = " ++ show expr) (reverse currentEnv)
                         return (Just currentEnv)
@@ -295,7 +301,7 @@ runREPL = do
                         return (Just currentEnv)
                     Right (CmdShowHelp) -> do
                         putStrLn helpText2
-                        return (Just currentEnv) 
+                        return (Just currentEnv)
                     Right (CmdCD path) -> do
                         setCurrentDirectory path
                         return (Just currentEnv)
@@ -350,7 +356,7 @@ runREPL = do
                                          Nothing -> ("\ESC[31m[\ESC[0m", "\ESC[31m]\ESC[0m")
                         putStrLn $ show normalizedResult ++ " " ++ lb ++ show expandedAst ++ rb
                         return (Just currentEnv)
-                
+
                 case result of
                     Left (e :: E.SomeException) -> do
                         liftIO $ putStrLn $ "error: " ++ show e
@@ -361,6 +367,6 @@ runREPL = do
 main :: IO ()
 main = do
     args <- getArgs
-    if null args 
-        then runREPL 
+    if null args
+        then runREPL
         else runFile (head args)

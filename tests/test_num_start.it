@@ -1,0 +1,2 @@
+123foo = \x -> x
+main = 123foo
