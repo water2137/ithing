@@ -1,4 +1,4 @@
--- the standard library for \interprething
+-- the standard library for interprething
 
 -- This program/library is separate from the interpreter itself
 -- THIS SPECIFIC FILE is licensed under 0BSD
@@ -28,6 +28,11 @@ and = (\p -> (\q -> ((p q) p)))
 or = (\p -> (\q -> ((p p) q)))
 not = (\p -> ((p false) true))
 xor = (\p -> (\q -> ((p (not q)) q)))
+bool_eq = (\p -> (\q -> ((p q) (not q))))
+
+-- Application and Composition
+apply = (\f -> (\x -> (f x)))
+on = (\f -> (\g -> (\x -> (\y -> ((f (g x)) (g y))))))
 
 -- Church Numerals
 zero = (\f -> (\x -> x))
@@ -37,6 +42,8 @@ two = (succ one)
 three = (succ two)
 four = ((plus two) two)
 five = (succ four)
+six = (succ five)
+seven = (succ six)
 eight = ((mult two) four)
 nine = ((exp three) two)
 ten = (succ nine)
@@ -65,7 +72,7 @@ div = (y_comb (\r -> (\m -> (\n -> ((((leq n) m) (succ ((r ((sub m) n)) n))) zer
 mod = (\m -> (\n -> ((sub m) ((mult n) ((div m) n)))))
 
 -- Pairs
-pair = (\x -> (\y_comb -> (\f -> ((f x) y_comb))))
+pair = (\x -> (\y -> (\f -> ((f x) y))))
 first = (\p -> (p true))
 second = (\p -> (p false))
 
@@ -76,19 +83,41 @@ cons = (\h -> (\t -> ((pair false) ((pair h) t))))
 car = (\l -> (first (second l)))
 cdr = (\l -> (second (second l)))
 
+-- Binary Tree: (is_leaf, value, left, right)
+leaf = (\x -> ((pair true) x))
+node = (\v -> (\l -> (\r -> ((pair false) ((pair v) ((pair l) r))))))
+
+is_leaf = first
+node_val = (\n -> (((is_leaf n) (second n)) (first (second n))))
+left_child = (\n -> (first (second (second n))))
+right_child = (\n -> (second (second (second n))))
+
+-- Maybe / Option
+nothing = (\nothing -> (\just -> nothing))
+just = (\x -> (\nothing -> (\just -> (just x))))
+is_nothing = (\m -> ((m true) (\x -> false)))
+
+-- Safe List Access
+head_safe = (\l -> (((is_nil l) nothing) (just (car l))))
+
 -- Advanced List Operations
 foldr = (y_comb (\f -> (\g -> (\z -> (\l -> (((is_nil l) z) ((g (car l)) (((f g) z) (cdr l)))))))))
 map = (\g -> (foldr (\x -> (\acc -> (cons (g x) acc))) nil))
 filter = (\p -> (foldr (\x -> (\acc -> (((p x) ((cons x) acc)) acc))) nil))
 length = (foldr (\x -> (\acc -> (succ acc))) zero)
-reverse = (\l -> (foldr (\x -> (\acc -> ((append acc) ((cons x) nil)))) nil l))
+rev_acc = (y_comb (\f -> (\acc -> (\l -> (((is_nil l) acc) (((f (cons (car l) acc)) (cdr l))))))))
+reverse = (rev_acc nil)
 append = (\l1 -> (\l2 -> (foldr cons l2 l1)))
 index = (\n -> (\l -> (car ((n cdr) l))))
+concat = (foldr append nil)
+flat_map = (\f -> (\l -> (concat ((map f) l))))
+zipWith = (y_comb (\f -> (\g -> (\l1 -> (\l2 -> (((or (is_nil l1) (is_nil l2)) nil) ((cons ((g (car l1)) (car l2))) (((f g) (cdr l1)) (cdr l2)))))))))
 
 -- Quantifiers and Searches
 any = (\p -> (foldr (\x -> (\acc -> ((or (p x)) acc))) false))
 all = (\p -> (foldr (\x -> (\acc -> ((and (p x)) acc))) true))
 take = (y_comb (\f -> (\n -> (\l -> (((or (iszero n) (is_nil l)) nil) ((cons (car l)) ((f (pred n)) (cdr l))))))))
+drop = (y_comb (\f -> (\n -> (\l -> (((or (iszero n) (is_nil l)) l) ((f (pred n)) (cdr l)))))))
 
 -- List Generation
 range = (y_comb (\f -> (\m -> (\n -> (((gt m) n) nil ((cons m) ((f (succ m)) n)))))))
