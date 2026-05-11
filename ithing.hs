@@ -76,6 +76,9 @@ data Value
 
 type VEnv = [(String, Value)]
 
+mkVEnv :: [(String, Expr)] -> VEnv
+mkVEnv = foldl (\env (k, v) -> (k, VThunk v env) : env) []
+
 eval :: VEnv -> Expr -> Value
 eval env (Var x) = case lookup x env of
     Just v -> force v
@@ -255,37 +258,35 @@ runFile filename = do
             case lookup "main" defs of
                 Nothing -> putStrLn "execution error: no main definition found in the script\ntry using :l in interactive mode instead"
                 Just mainExpr -> do
-                    let vEnv = [(k, VThunk v vEnv) | (k, v) <- defs, k /= "main"]
+                    let vEnv = mkVEnv (filter ((/= "main") . fst) defs)
                     let res = normalize vEnv mainExpr
                     putStrLn $ show res
 
 introText :: String
 introText = "interpretthing, Copyright (C)  2026 water2137\n\
 \interpretthing comes with ABSOLUTELY NO WARRANTY; for details\n\
-\about the license, type `:L`\n"
+\about the license, type `:L`\n\
+\`:h` for help\n"
 
 helpText :: String
-helpText = "builtins: :[!lsrShcdLDC|cd]\nexample code: a = \\x -> x x\n              a a"
-
-helpText2 :: String
-helpText2 = "builtins: :[!lsrShcdLDC|cd]\n\
-\! - shell escape\n\
-\l - load definitions file\n\
-\s - save definitions to file\n\
-\r - redirect output to file (or :r to stop)\n\
+helpText = "builtins: :[!lsrShcdLDC|cd]\n\
+\! [shell] - shell escape\n\
+\l [file] - load definitions file\n\
+\s [file] - save definitions to file\n\
+\r [file] - redirect output to file (or no file to stop)\n\
 \S - load standard library\n\
 \c - clear definitions\n\
 \h - hmmm idk what this does\n\
 \d - dump definitions\n\
 \L - license details\n\
-\D - debug, shows every reduction step\n\
-\C - church to human readable\n\
+\D [expr] - debug, shows every reduction step\n\
+\C [expr] - church to human readable\n\
 \example code: a = \\x -> x x\n\
 \              a a\n"
 
 runREPL :: IO ()
 runREPL = do
-    putStrLn (introText ++ helpText)
+    putStrLn introText
     runInputT defaultSettings $ withInterrupt $ loop [] Nothing
   where
     loop currentEnv maybeRedir = handleInterrupt (loop currentEnv maybeRedir) $ do
@@ -319,7 +320,7 @@ runREPL = do
                             putStr' licenseText
                             return (Just (currentEnv, maybeRedir))
                         Right (CmdShowHelp) -> do
-                            putStrLn helpText2
+                            putStrLn helpText
                             return (Just (currentEnv, maybeRedir))
                         Right (CmdCD path) -> do
                             setCurrentDirectory path
@@ -361,12 +362,12 @@ runREPL = do
                             loopSteps e
                             return (Just (currentEnv, maybeRedir))
                         Right (CmdChurch e) -> do
-                            let vEnv = [(k, VThunk v vEnv) | (k, v) <- currentEnv]
+                            let vEnv = mkVEnv (reverse currentEnv)
                             let normalizedResult = normalize vEnv e
                             putStrLn' $ decode normalizedResult
                             return (Just (currentEnv, maybeRedir))
                         Right (CmdExpr e) -> do
-                            let vEnv = [(k, VThunk v vEnv) | (k, v) <- currentEnv]
+                            let vEnv = mkVEnv (reverse currentEnv)
                             let normalizedResult = normalize vEnv e
                             let expandedAst = expand vEnv e
                             noColor <- liftIO $ lookupEnv "NO_COLOR"
