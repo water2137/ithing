@@ -33,7 +33,9 @@ licenseText = "Copyright (C) 2026  water2137\n\n\
 \GNU General Public License for more details.\n\n\
 \You should have received a copy of the GNU General Public License\n\
 \along with this program; if not, see\n\
-\<https://www.gnu.org/licenses/>.\n"
+\<https://www.gnu.org/licenses/>.\n\n\
+\Source code for interprething may be obtained at\n\
+\<https://github.com/water2137/ithing>\n"
 
 stdlib :: String
 stdlib = $(readCompileTimeFile "it-std.txt")
