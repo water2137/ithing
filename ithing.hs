@@ -1,5 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE BangPatterns #-}
 
 import System.Environment (getArgs, lookupEnv)
 import System.IO (hFlush, stdout, isEOF)
@@ -11,8 +12,9 @@ import System.Process (system)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteString.Lazy.Char8 as BL
 import Data.Char (isSpace)
-import Data.List (nub, (\\), intercalate)
+import Data.List (nub, (\\), intercalate, foldl')
 import qualified Data.Set as Set
+import qualified Data.Map.Lazy as Map
 
 import Text.Parsec
 import Text.Parsec.String (Parser)
@@ -72,41 +74,69 @@ data Value
     = VVar String
     | VApp Value Value
     | VLam String Expr VEnv
-    | VThunk Expr VEnv
+    | VThunk Expr VEnv Value
 
-type VEnv = [(String, Value)]
+data VEnv = VEnv !(Map.Map String Value) ![(String, Value)]
 
 mkVEnv :: [(String, Expr)] -> VEnv
-mkVEnv = foldl (\env (k, v) -> (k, VThunk v env) : env) []
+mkVEnv defs = let globals = Map.fromList [ (k, VThunk v (VEnv globals []) (eval (VEnv globals []) v)) | (k, v) <- defs ]
+              in VEnv globals []
 
 eval :: VEnv -> Expr -> Value
-eval env (Var x) = case lookup x env of
+eval env@(VEnv g l) (Var x) = case lookup x l of
     Just v -> force v
-    Nothing -> VVar x
+    Nothing -> case Map.lookup x g of
+        Just v -> force v
+        Nothing -> VVar x
   where
-    force (VThunk e env') = eval env' e
+    force (VThunk _ _ v) = v
     force v = v
 eval env (Lam x b) = VLam x b env
 eval env (App f a) = case eval env f of
-    VLam x b env' -> eval ((x, VThunk a env) : env') b
-    f' -> VApp f' (VThunk a env)
+    VLam x b (VEnv g' l') ->
+        let !arg = case a of
+                     Var y -> case lookup y (snd env) of
+                                Just v -> v
+                                Nothing -> case Map.lookup y (fst env) of
+                                             Just v -> v
+                                             Nothing -> VVar y
+                     _     -> VThunk a env (eval env a)
+        in eval (VEnv g' ((x, arg) : l')) b
+    f' ->
+        let !arg = case a of
+                     Var y -> case lookup y (snd env) of
+                                Just v -> v
+                                Nothing -> case Map.lookup y (fst env) of
+                                             Just v -> v
+                                             Nothing -> VVar y
+                     _     -> VThunk a env (eval env a)
+        in VApp f' arg
+  where
+    fst (VEnv g _) = g
+    snd (VEnv _ l) = l
 
 quote :: Int -> Value -> Expr
 quote l (VVar x) = Var x
 quote l (VApp f a) = App (quote l f) (quote l a)
-quote l (VLam x b env) =
+quote l (VLam x b (VEnv g l')) =
     let x' = x ++ show l
-    in Lam x' (quote (l + 1) (eval ((x, VVar x') : env) b))
-quote l (VThunk e env) = quote l (eval env e)
+    in Lam x' (quote (l + 1) (eval (VEnv g ((x, VVar x') : l')) b))
+quote l (VThunk _ _ v) = quote l v
 
 expand :: VEnv -> Expr -> Expr
-expand env (Var x) = case lookup x env of
+expand env (Var x) = case lookupEnv x env of
     Just (VVar y) -> Var y
-    Just (VThunk e env') -> expand env' e
+    Just (VThunk e env' _) -> expand env' e
     _ -> Var x
+  where
+    lookupEnv x (VEnv g l) = case lookup x l of
+        Just v -> Just v
+        Nothing -> Map.lookup x g
 expand env (Lam x b) =
     let x' = x ++ "'" -- simple freshening for expand
-    in Lam x' (expand ((x, VVar x') : env) b)
+    in Lam x' (expand (extendEnv x (VVar x') env) b)
+  where
+    extendEnv k v (VEnv g l) = VEnv g ((k,v):l)
 expand env (App f a) = App (expand env f) (expand env a)
 
 -- Pure reduction to WHNF
@@ -216,11 +246,11 @@ replParser = do
      <|> (eof >> return CmdNOP))
 
 isChurchNumeral :: Expr -> Maybe Int
-isChurchNumeral (Lam f (Lam x body)) | f /= x = go body
+isChurchNumeral (Lam f (Lam x body)) | f /= x = go 0 body
   where
-    go (Var v) | v == x = Just 0
-    go (App (Var v) arg) | v == f = (+1) <$> go arg
-    go _ = Nothing
+    go !acc (Var v) | v == x = Just acc
+    go !acc (App (Var v) arg) | v == f = go (acc + 1) arg
+    go _ _ = Nothing
 isChurchNumeral _ = Nothing
 
 isChurchBool :: Expr -> Maybe Bool
@@ -231,11 +261,11 @@ isChurchBool (Lam t (Lam f' body)) | t /= f' = case body of
 isChurchBool _ = Nothing
 
 isChurchList :: Expr -> Maybe [Expr]
-isChurchList (Lam c (Lam n body)) | c /= n = go body
+isChurchList (Lam c (Lam n body)) | c /= n = go [] body
   where
-    go (Var v) | v == n = Just []
-    go (App (App (Var v) x) rest) | v == c = (x:) <$> go rest
-    go _ = Nothing
+    go !acc (Var v) | v == n = Just (reverse acc)
+    go !acc (App (App (Var v) x) rest) | v == c = go (x:acc) rest
+    go _ _ = Nothing
 isChurchList _ = Nothing
 
 decode :: Expr -> String
