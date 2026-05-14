@@ -1,0 +1,12 @@
+# Compiled C objects
+*.o
+*.a
+*.so
+
+# Compiled Haskell objects
+*.hi
+
+# Executables
+cithing
+
+*.dSYM
