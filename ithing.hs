@@ -16,6 +16,11 @@ import Data.List (nub, (\\), intercalate, foldl')
 import qualified Data.Set as Set
 import qualified Data.Map.Lazy as Map
 
+import qualified Data.IntMap.Strict as IM
+import Data.IORef
+import System.IO.Unsafe (unsafePerformIO)
+import qualified Data.Map.Strict as MS
+
 import Text.Parsec
 import Text.Parsec.String (Parser)
 import qualified Text.Parsec.Token as Tok
@@ -43,138 +48,150 @@ stdlib :: String
 stdlib = $(readCompileTimeFile "it-std.txt")
 
 data Expr
-    = Var String
-    | Lam String Expr
+    = Var !Int
+    | Lam !Int Expr
     | App Expr Expr
 
 alphaEq :: Expr -> Expr -> Bool
-alphaEq e1 e2 = go [] [] e1 e2
+alphaEq e1 e2 = go IM.empty IM.empty e1 e2
   where
-    go env1 env2 (Var x) (Var y) =
-        case (lookup x env1, lookup y env2) of
-            (Just i, Just j) -> i == j
-            (Nothing, Nothing) -> x == y
+    go m1 m2 (Var i) (Var j) =
+        case (IM.lookup i m1, IM.lookup j m2) of
+            (Just a, Just b) -> a == b
+            (Nothing, Nothing) -> i == j
             _ -> False
-    go env1 env2 (Lam x b1) (Lam y b2) =
-        let n = length env1
-        in go ((x, n) : env1) ((y, n) : env2) b1 b2
-    go env1 env2 (App f1 a1) (App f2 a2) =
-        go env1 env2 f1 f2 && go env1 env2 a1 a2
+    go m1 m2 (Lam i b1) (Lam j b2) =
+        let n = IM.size m1
+        in go (IM.insert i n m1) (IM.insert j n m2) b1 b2
+    go m1 m2 (App f1 a1) (App f2 a2) =
+        go m1 m2 f1 f2 && go m1 m2 a1 a2
     go _ _ _ _ = False
 
 instance Eq Expr where
     (==) = alphaEq
 
 instance Show Expr where
-    show (Var x) = x
-    show (Lam x b) = "(\\" ++ x ++ " -> " ++ show b ++ ")"
-    show (App f a) = "(" ++ show f ++ " " ++ show a ++ ")"
+    show e = go e
+      where
+        go (Var i) = getInternedName i
+        go (Lam i b) = "(\\" ++ getInternedName i ++ " -> " ++ go b ++ ")"
+        go (App f a) = "(" ++ go f ++ " " ++ go a ++ ")"
 
 data Value
-    = VVar String
-    | VApp Value Value
-    | VLam String Expr VEnv
-    | VThunk Expr VEnv Value
+    = VVar !Int
+    | VApp !Value !Value
+    | VLam !(Value -> Value)
+    | VThunk !(IORef (Maybe Value)) !(IO Value)
 
-data VEnv = VEnv !(Map.Map String Value) ![(String, Value)]
+force :: Value -> Value
+force (VThunk r m) = unsafePerformIO $ do
+    mv <- readIORef r
+    case mv of
+        Just v -> return v
+        Nothing -> do
+            v <- m
+            writeIORef r (Just v)
+            return v
+force v = v
 
-mkVEnv :: [(String, Expr)] -> VEnv
-mkVEnv defs = let globals = Map.fromList [ (k, VThunk v (VEnv globals []) (eval (VEnv globals []) v)) | (k, v) <- defs ]
-              in VEnv globals []
+type Env = IM.IntMap Value
 
-eval :: VEnv -> Expr -> Value
-eval env@(VEnv g l) (Var x) = case lookup x l of
+-- Interning table
+type Interner = MS.Map String Int
+type ReverseInterner = IM.IntMap String
+type InternState = (Int, Interner, ReverseInterner)
+
+emptyIntern :: InternState
+emptyIntern = (0, MS.empty, IM.empty)
+
+intern :: String -> InternState -> (Int, InternState)
+intern s (next, m, rm) = case MS.lookup s m of
+    Just i -> (i, (next, m, rm))
+    Nothing -> (next, (next + 1, MS.insert s next m, IM.insert next s rm))
+
+-- Global interner state
+{-# NOINLINE globalInterner #-}
+globalInterner :: IORef InternState
+globalInterner = unsafePerformIO $ newIORef emptyIntern
+
+internStr :: String -> Int
+internStr s = unsafePerformIO $ atomicModifyIORef' globalInterner (\st -> let (i, st') = intern s st in (st', i))
+
+getInternedName :: Int -> String
+getInternedName i
+    | i < 0 = "x" ++ show (-(i + 1))
+    | otherwise = unsafePerformIO $ do
+        (_, _, rm) <- readIORef globalInterner
+        case IM.lookup i rm of
+            Just s -> return s
+            Nothing -> return ("v" ++ show i)
+
+evalHOAS :: Env -> Expr -> Value
+evalHOAS env (Var i) = case IM.lookup i env of
     Just v -> force v
-    Nothing -> case Map.lookup x g of
-        Just v -> force v
-        Nothing -> VVar x
+    Nothing -> VVar i
+evalHOAS env (Lam i b) = VLam $ \a -> evalHOAS (IM.insert i a env) b
+evalHOAS env (App f a) = apply (evalHOAS env f) (evalHOAS env a)
   where
-    force (VThunk _ _ v) = v
-    force v = v
-eval env (Lam x b) = VLam x b env
-eval env (App f a) = case eval env f of
-    VLam x b (VEnv g' l') ->
-        let !arg = case a of
-                     Var y -> case lookup y (snd env) of
-                                Just v -> v
-                                Nothing -> case Map.lookup y (fst env) of
-                                             Just v -> v
-                                             Nothing -> VVar y
-                     _     -> VThunk a env (eval env a)
-        in eval (VEnv g' ((x, arg) : l')) b
-    f' ->
-        let !arg = case a of
-                     Var y -> case lookup y (snd env) of
-                                Just v -> v
-                                Nothing -> case Map.lookup y (fst env) of
-                                             Just v -> v
-                                             Nothing -> VVar y
-                     _     -> VThunk a env (eval env a)
-        in VApp f' arg
-  where
-    fst (VEnv g _) = g
-    snd (VEnv _ l) = l
+    apply f' arg = case force f' of
+        VLam g -> g arg
+        f'' -> VApp f'' arg
+
+mkVEnv :: [(Int, Expr)] -> Env
+mkVEnv defs =
+    let globals = IM.fromList [ (i, mkThunk i v) | (i, v) <- defs ]
+        mkThunk i v = unsafePerformIO $ do
+            r <- newIORef Nothing
+            return $ VThunk r (return $ evalHOAS globals v)
+    in globals
 
 quote :: Int -> Value -> Expr
-quote l (VVar x) = Var x
-quote l (VApp f a) = App (quote l f) (quote l a)
-quote l (VLam x b (VEnv g l')) =
-    let x' = x ++ show l
-    in Lam x' (quote (l + 1) (eval (VEnv g ((x, VVar x') : l')) b))
-quote l (VThunk _ _ v) = quote l v
+quote l v = case force v of
+    VVar i -> Var i
+    VApp f a -> App (quote l f) (quote l a)
+    VLam f ->
+        let i = -l - 1
+        in Lam i (quote (l + 1) (f (VVar i)))
 
-expand :: VEnv -> Expr -> Expr
-expand env (Var x) = case lookupEnv x env of
-    Just (VVar y) -> Var y
-    Just (VThunk e env' _) -> expand env' e
-    _ -> Var x
-  where
-    lookupEnv x (VEnv g l) = case lookup x l of
-        Just v -> Just v
-        Nothing -> Map.lookup x g
-expand env (Lam x b) =
-    let x' = x ++ "'" -- simple freshening for expand
-    in Lam x' (expand (extendEnv x (VVar x') env) b)
-  where
-    extendEnv k v (VEnv g l) = VEnv g ((k,v):l)
+normalize :: Env -> Expr -> Expr
+normalize env e = quote 0 (evalHOAS env e)
+
+expand :: Env -> Expr -> Expr
+expand env (Var i) = case IM.lookup i env of
+    Just v -> quote 0 v
+    Nothing -> Var i
+expand env (Lam i b) =
+    let name = getInternedName i ++ "'"
+        i' = internStr name
+    in Lam i' (expand (IM.insert i (VVar i') env) b)
 expand env (App f a) = App (expand env f) (expand env a)
 
--- Pure reduction to WHNF
-reduce :: VEnv -> Expr -> Value
-reduce = eval
-
-normalize :: VEnv -> Expr -> Expr
-normalize env e = quote 0 (eval env e)
-
-freeVars :: Expr -> Set.Set String
-freeVars (Var x) = Set.singleton x
-freeVars (Lam x b) = Set.delete x (freeVars b)
+freeVars :: Expr -> Set.Set Int
+freeVars (Var i) = Set.singleton i
+freeVars (Lam i b) = Set.delete i (freeVars b)
 freeVars (App f a) = Set.union (freeVars f) (freeVars a)
 
-fresh :: Set.Set String -> String -> String
-fresh used x | x `Set.notMember` used = x
-             | otherwise = fresh used (x ++ "'")
-
-subst :: String -> Expr -> Expr -> Expr
+subst :: Int -> Expr -> Expr -> Expr
 subst x s (Var y) | x == y = s
                   | otherwise = Var y
 subst x s (Lam y b)
     | x == y = Lam y b
     | y `Set.member` freeVars s =
-        let y' = fresh (freeVars s `Set.union` freeVars b) y
+        let name = getInternedName y ++ "'"
+            y' = internStr name
         in Lam y' (subst x s (subst y (Var y') b))
     | otherwise = Lam y (subst x s b)
 subst x s (App f a) = App (subst x s f) (subst x s a)
 
-step :: [(String, Expr)] -> Expr -> Maybe Expr
-step env (Var x) = lookup x env
+step :: [(Int, Expr)] -> Expr -> Maybe Expr
+step env (Var i) = lookup i env
 step env (App f a) =
     case f of
         Lam x b -> Just (subst x a b)
         _ -> case step env f of
                 Just f' -> Just (App f' a)
                 Nothing -> App f <$> step env a
-step env (Lam x b) = Lam x <$> step env b
+step env (Lam i b) = Lam i <$> step env b
 
 lexer = Tok.makeTokenParser emptyDef
     { Tok.reservedOpNames = ["->", "\\", "="]
@@ -191,7 +208,7 @@ whiteSpace = Tok.whiteSpace lexer
 atom :: Parser Expr
 atom = parens expr
    <|> lam
-   <|> (try (Var <$> identifier <* notFollowedBy (reservedOp "=")))
+   <|> (try (Var . internStr <$> identifier <* notFollowedBy (reservedOp "=")))
 
 lam :: Parser Expr
 lam = do
@@ -199,7 +216,7 @@ lam = do
     vars <- many1 identifier
     reservedOp "->"
     body <- expr
-    return $ foldr Lam body vars
+    return $ foldr (\v b -> Lam (internStr v) b) body vars
 
 app :: Parser Expr
 app = do
@@ -209,21 +226,21 @@ app = do
 expr :: Parser Expr
 expr = app
 
-assignment :: Parser (String, Expr)
+assignment :: Parser (Int, Expr)
 assignment = do
     name <- identifier
     reservedOp "="
     val <- expr
-    return (name, val)
+    return (internStr name, val)
 
-fileParser :: Parser [(String, Expr)]
+fileParser :: Parser [(Int, Expr)]
 fileParser = do
     whiteSpace
     defs <- many (try assignment)
     eof
     return defs
 
-data ReplCmd = CmdAssign String Expr | CmdExpr Expr | CmdLoad String | CmdSave String | CmdLoadStd | CmdClear | CmdCD String | CmdShell String | CmdShowHelp | CmdShowDefs | CmdShowLicense | CmdDebug Expr | CmdChurch Expr | CmdRedirect String | CmdStopRedirect | CmdNOP
+data ReplCmd = CmdAssign Int Expr | CmdExpr Expr | CmdLoad String | CmdSave String | CmdLoadStd | CmdClear | CmdCD String | CmdShell String | CmdShowHelp | CmdShowDefs | CmdShowLicense | CmdDebug Expr | CmdChurch Expr | CmdRedirect String | CmdStopRedirect | CmdNOP
 
 replParser :: Parser ReplCmd
 replParser = do
@@ -241,7 +258,7 @@ replParser = do
      <|> try (do char ':'; char 'L'; whiteSpace; eof; return CmdShowLicense)
      <|> try (do char ':'; char 'D'; whiteSpace; e <- expr; whiteSpace; eof; return $ CmdDebug e)
      <|> try (do char ':'; char 'C'; whiteSpace; e <- expr; whiteSpace; eof; return $ CmdChurch e)
-     <|> try (do (n, v) <- assignment; whiteSpace; eof; return $ CmdAssign n v)
+     <|> try (do (i, v) <- assignment; whiteSpace; eof; return $ CmdAssign i v)
      <|> try (do e <- expr; whiteSpace; eof; return $ CmdExpr e)
      <|> (eof >> return CmdNOP))
 
@@ -273,10 +290,7 @@ decode e
     | Just n <- isChurchNumeral e = show n
     | Just b <- isChurchBool e = show b
     | Just l <- isChurchList e = "[" ++ intercalate ", " (map decode l) ++ "]"
-    | otherwise = case e of
-        Var x -> x
-        Lam x b -> "(\\" ++ x ++ " -> " ++ decode b ++ ")"
-        App f a -> "(" ++ decode f ++ " " ++ decode a ++ ")"
+    | otherwise = show e
 
 runFile :: String -> IO ()
 runFile filename = do
@@ -285,10 +299,11 @@ runFile filename = do
     case parse fileParser filename code of
         Left err -> print err
         Right defs -> do
-            case lookup "main" defs of
+            let mainId = internStr "main"
+            case lookup mainId defs of
                 Nothing -> putStrLn "execution error: no main definition found in the script\ntry using :l in interactive mode instead"
                 Just mainExpr -> do
-                    let vEnv = mkVEnv (filter ((/= "main") . fst) defs)
+                    let vEnv = mkVEnv (filter ((/= mainId) . fst) defs)
                     let res = normalize vEnv mainExpr
                     putStrLn $ show res
 
@@ -344,7 +359,7 @@ runREPL = do
                         Right CmdShowDefs -> do
                             if null currentEnv
                                 then putStrLn' "nothing defined"
-                                else mapM_ (\(name, expr) -> putStrLn' $ name ++ " = " ++ show expr) (reverse currentEnv)
+                                else mapM_ (\(i, expr) -> putStrLn' $ getInternedName i ++ " = " ++ show expr) (reverse currentEnv)
                             return (Just (currentEnv, maybeRedir))
                         Right CmdShowLicense -> do
                             putStr' licenseText
@@ -369,7 +384,7 @@ runREPL = do
                                     putStrLn' $ "loaded " ++ show (length defs) ++ " definitions from " ++ path
                                     return (Just (reverse defs ++ currentEnv, maybeRedir))
                         Right (CmdSave path) -> do
-                            let content = concatMap (\(name, expr) -> name ++ " = " ++ show expr ++ "\n") (reverse currentEnv)
+                            let content = concatMap (\(i, expr) -> getInternedName i ++ " = " ++ show expr ++ "\n") (reverse currentEnv)
                             writeFile path content
                             putStrLn' $ "saved " ++ show (length currentEnv) ++ " definitions to " ++ path
                             return (Just (currentEnv, maybeRedir))
@@ -379,9 +394,9 @@ runREPL = do
                                 Right defs -> do
                                     putStrLn' $ "loaded " ++ show (length defs) ++ " definitions from standard library"
                                     return (Just (reverse defs ++ currentEnv, maybeRedir))
-                        Right (CmdAssign name val) -> do
-                            putStrLn' $ "defined " ++ name
-                            return (Just ((name, val) : currentEnv, maybeRedir))
+                        Right (CmdAssign i val) -> do
+                            putStrLn' $ "defined " ++ getInternedName i
+                            return (Just ((i, val) : currentEnv, maybeRedir))
                         Right CmdNOP -> return (Just (currentEnv, maybeRedir))
                         Right (CmdDebug e) -> do
                             let loopSteps expr = do
