@@ -21,10 +21,11 @@ import Data.IORef
 import System.IO.Unsafe (unsafePerformIO)
 import qualified Data.Map.Strict as MS
 
-import Text.Parsec
-import Text.Parsec.String (Parser)
-import qualified Text.Parsec.Token as Tok
-import Text.Parsec.Language (emptyDef)
+import Data.Void
+import Text.Megaparsec
+import Text.Megaparsec.Char
+import qualified Text.Megaparsec.Char.Lexer as L
+import Control.Applicative (empty)
 
 import Read (readCompileTimeFile)
 
@@ -118,7 +119,7 @@ internStr :: String -> Int
 internStr s = unsafePerformIO $ atomicModifyIORef' globalInterner (\st -> let (i, st') = intern s st in (st', i))
 
 getInternedName :: Int -> String
-getInternedName i 
+getInternedName i
     | i < 0 = "x" ++ show (-(i + 1))
     | otherwise = unsafePerformIO $ do
         (_, _, rm) <- readIORef globalInterner
@@ -193,17 +194,37 @@ step env (App f a) =
                 Nothing -> App f <$> step env a
 step env (Lam i b) = Lam i <$> step env b
 
-lexer = Tok.makeTokenParser emptyDef
-    { Tok.reservedOpNames = ["->", "\\", "="]
-    , Tok.reservedNames   = ["->", "\\", "="]
-    , Tok.commentLine     = "--"
-    , Tok.identStart      = alphaNum <|> oneOf "!#$%&*+./<=>?@^|-~_"
-    , Tok.identLetter     = alphaNum <|> oneOf "!#$%&*+./<=>?@^|-~_'"
-    }
-identifier = Tok.identifier lexer
-parens     = Tok.parens lexer
-reservedOp = Tok.reservedOp lexer
-whiteSpace = Tok.whiteSpace lexer
+type Parser = Parsec Void String
+
+sc :: Parser ()
+sc = L.space space1 (L.skipLineComment "--") empty
+
+lexeme :: Parser a -> Parser a
+lexeme = L.lexeme sc
+
+symbol :: String -> Parser String
+symbol = L.symbol sc
+
+parens :: Parser a -> Parser a
+parens = between (symbol "(") (symbol ")")
+
+identifier :: Parser String
+identifier = lexeme $ try $ do
+    x <- p
+    check x
+  where
+    p       = (:) <$> identStart <*> many identLetter
+    check x = if x `elem` ["->", "\\", "="]
+                then fail $ "keyword " ++ show x ++ " cannot be an identifier"
+                else return x
+    identStart  = alphaNumChar <|> oneOf "!#$%&*+./<=>?@^|-~_"
+    identLetter = alphaNumChar <|> oneOf "!#$%&*+./<=>?@^|-~_'"
+
+reservedOp :: String -> Parser ()
+reservedOp name = lexeme $ try $ string name *> notFollowedBy (oneOf "!#$%&*+./<=>?@^|-~_'")
+
+whiteSpace :: Parser ()
+whiteSpace = sc
 
 atom :: Parser Expr
 atom = parens expr
@@ -213,14 +234,14 @@ atom = parens expr
 lam :: Parser Expr
 lam = do
     reservedOp "\\"
-    vars <- many1 identifier
+    vars <- some identifier
     reservedOp "->"
     body <- expr
     return $ foldr (\v b -> Lam (internStr v) b) body vars
 
 app :: Parser Expr
 app = do
-    es <- many1 atom
+    es <- some atom
     return $ foldl1 App es
 
 expr :: Parser Expr
@@ -245,13 +266,13 @@ data ReplCmd = CmdAssign Int Expr | CmdExpr Expr | CmdLoad String | CmdSave Stri
 replParser :: Parser ReplCmd
 replParser = do
     whiteSpace
-    (try (do char ':'; char 'l'; whiteSpace; path <- many1 (satisfy (not . isSpace)); whiteSpace; eof; return $ CmdLoad path)
-     <|> try (do char ':'; char 's'; whiteSpace; path <- many1 (satisfy (not . isSpace)); whiteSpace; eof; return $ CmdSave path)
-     <|> try (do char ':'; char 'r'; whiteSpace; path <- many1 (satisfy (not . isSpace)); whiteSpace; eof; return $ CmdRedirect path)
+    (try (do char ':'; char 'l'; whiteSpace; path <- some (satisfy (not . isSpace)); whiteSpace; eof; return $ CmdLoad path)
+     <|> try (do char ':'; char 's'; whiteSpace; path <- some (satisfy (not . isSpace)); whiteSpace; eof; return $ CmdSave path)
+     <|> try (do char ':'; char 'r'; whiteSpace; path <- some (satisfy (not . isSpace)); whiteSpace; eof; return $ CmdRedirect path)
      <|> try (do char ':'; char 'r'; whiteSpace; eof; return CmdStopRedirect)
      <|> try (do char ':'; char 'S'; whiteSpace; eof; return CmdLoadStd)
-     <|> try (do char ':'; char '!'; whiteSpace; cmd <- many anyChar; eof; return $ CmdShell cmd)
-     <|> try (do char ':'; char 'c'; char 'd'; whiteSpace; path <- many1 (satisfy (not . isSpace)); whiteSpace; eof; return $ CmdCD path)
+     <|> try (do char ':'; char '!'; whiteSpace; cmd <- many anySingle; eof; return $ CmdShell cmd)
+     <|> try (do char ':'; char 'c'; char 'd'; whiteSpace; path <- some (satisfy (not . isSpace)); whiteSpace; eof; return $ CmdCD path)
      <|> try (do char ':'; char 'c'; whiteSpace; eof; return CmdClear)
      <|> try (do char ':'; char 'h'; whiteSpace; eof; return CmdShowHelp)
      <|> try (do char ':'; char 'd'; whiteSpace; eof; return CmdShowDefs)
@@ -308,7 +329,7 @@ runFile filename = do
     bs <- BL.readFile filename
     let code = BL.unpack bs
     case parse fileParser filename code of
-        Left err -> print err
+        Left err -> putStr (errorBundlePretty err)
         Right defs -> do
             let mainId = internStr "main"
             case lookup mainId defs of
@@ -359,7 +380,7 @@ runREPL = do
                                         Nothing -> putStr s
                                         Just path -> appendFile path s
                     case parse replParser "<stdin>" line of
-                        Left err -> print err >> return (Just (currentEnv, maybeRedir))
+                        Left err -> putStr (errorBundlePretty err) >> return (Just (currentEnv, maybeRedir))
                         Right (CmdRedirect path) -> do
                             writeFile path ""
                             putStrLn $ "redirecting output to " ++ path
@@ -390,7 +411,7 @@ runREPL = do
                         Right (CmdLoad path) -> do
                             content <- BL.readFile path
                             case parse fileParser path (BL.unpack content) of
-                                Left err -> print err >> return (Just (currentEnv, maybeRedir))
+                                Left err -> putStr (errorBundlePretty err) >> return (Just (currentEnv, maybeRedir))
                                 Right defs -> do
                                     putStrLn' $ "loaded " ++ show (length defs) ++ " definitions from " ++ path
                                     return (Just (reverse defs ++ currentEnv, maybeRedir))
@@ -401,7 +422,7 @@ runREPL = do
                             return (Just (currentEnv, maybeRedir))
                         Right CmdLoadStd -> do
                             case parse fileParser "stdlib" stdlib of
-                                Left err -> print err >> return (Just (currentEnv, maybeRedir))
+                                Left err -> putStr (errorBundlePretty err) >> return (Just (currentEnv, maybeRedir))
                                 Right defs -> do
                                     putStrLn' $ "loaded " ++ show (length defs) ++ " definitions from standard library"
                                     return (Just (reverse defs ++ currentEnv, maybeRedir))
