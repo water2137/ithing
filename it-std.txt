@@ -129,7 +129,7 @@ sum_l = (foldr plus zero)
 product_l = (foldr mult one)
 
 -- Higher Math
-fact = (y_comb (\f -> (\n -> (((iszero n) one) ((mult n) (f (pred n)))))))
+fact = (\n -> (first ((n (\p -> (pair ((mult (first p)) (second p)) (succ (second p))))) (pair one one))))
 fib = (y_comb (\f -> (\n -> ((((leq n) one) n) ((plus (f ((sub n) one))) (f ((sub n) two)))))))
 
 -- Evil

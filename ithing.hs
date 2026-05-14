@@ -118,7 +118,7 @@ internStr :: String -> Int
 internStr s = unsafePerformIO $ atomicModifyIORef' globalInterner (\st -> let (i, st') = intern s st in (st', i))
 
 getInternedName :: Int -> String
-getInternedName i
+getInternedName i 
     | i < 0 = "x" ++ show (-(i + 1))
     | otherwise = unsafePerformIO $ do
         (_, _, rm) <- readIORef globalInterner
@@ -262,35 +262,46 @@ replParser = do
      <|> try (do e <- expr; whiteSpace; eof; return $ CmdExpr e)
      <|> (eof >> return CmdNOP))
 
-isChurchNumeral :: Expr -> Maybe Int
-isChurchNumeral (Lam f (Lam x body)) | f /= x = go 0 body
-  where
-    go !acc (Var v) | v == x = Just acc
-    go !acc (App (Var v) arg) | v == f = go (acc + 1) arg
-    go _ _ = Nothing
-isChurchNumeral _ = Nothing
-
-isChurchBool :: Expr -> Maybe Bool
-isChurchBool (Lam t (Lam f' body)) | t /= f' = case body of
-    Var v | v == t -> Just True
-          | v == f' -> Just False
+isChurchNumeralVal :: Value -> Maybe Int
+isChurchNumeralVal v = case force v of
+    VLam f -> case force (f (VVar (-1))) of
+        VLam g -> go 0 (g (VVar (-2)))
+          where
+            go !acc v' = case force v' of
+                VVar (-2) -> Just acc
+                VApp (VVar (-1)) arg -> go (acc + 1) arg
+                _ -> Nothing
+        _ -> Nothing
     _ -> Nothing
-isChurchBool _ = Nothing
 
-isChurchList :: Expr -> Maybe [Expr]
-isChurchList (Lam c (Lam n body)) | c /= n = go [] body
-  where
-    go !acc (Var v) | v == n = Just (reverse acc)
-    go !acc (App (App (Var v) x) rest) | v == c = go (x:acc) rest
-    go _ _ = Nothing
-isChurchList _ = Nothing
+isChurchBoolVal :: Value -> Maybe Bool
+isChurchBoolVal v = case force v of
+    VLam f -> case force (f (VVar (-1))) of
+        VLam g -> case force (g (VVar (-2))) of
+            VVar i | i == -1 -> Just True
+                   | i == -2 -> Just False
+            _ -> Nothing
+        _ -> Nothing
+    _ -> Nothing
 
-decode :: Expr -> String
-decode e
-    | Just n <- isChurchNumeral e = show n
-    | Just b <- isChurchBool e = show b
-    | Just l <- isChurchList e = "[" ++ intercalate ", " (map decode l) ++ "]"
-    | otherwise = show e
+isChurchListVal :: Value -> Maybe [Value]
+isChurchListVal v = case force v of
+    VLam f -> case force (f (VVar (-1))) of
+        VLam g -> go [] (g (VVar (-2)))
+          where
+            go !acc v' = case force v' of
+                VVar (-2) -> Just (reverse acc)
+                VApp (VApp (VVar (-1)) x) rest -> go (x:acc) rest
+                _ -> Nothing
+        _ -> Nothing
+    _ -> Nothing
+
+decodeVal :: Value -> String
+decodeVal v
+    | Just n <- isChurchNumeralVal v = show n
+    | Just b <- isChurchBoolVal v = show b
+    | Just l <- isChurchListVal v = "[" ++ intercalate ", " (map decodeVal l) ++ "]"
+    | otherwise = show (quote 0 v)
 
 runFile :: String -> IO ()
 runFile filename = do
@@ -304,8 +315,8 @@ runFile filename = do
                 Nothing -> putStrLn "execution error: no main definition found in the script\ntry using :l in interactive mode instead"
                 Just mainExpr -> do
                     let vEnv = mkVEnv (filter ((/= mainId) . fst) defs)
-                    let res = normalize vEnv mainExpr
-                    putStrLn $ show res
+                    let res = evalHOAS vEnv mainExpr
+                    putStrLn $ decodeVal res
 
 introText :: String
 introText = "interpretthing, Copyright (C)  2026 water2137\n\
@@ -408,12 +419,13 @@ runREPL = do
                             return (Just (currentEnv, maybeRedir))
                         Right (CmdChurch e) -> do
                             let vEnv = mkVEnv (reverse currentEnv)
-                            let normalizedResult = normalize vEnv e
-                            putStrLn' $ decode normalizedResult
+                            let valResult = evalHOAS vEnv e
+                            putStrLn' $ decodeVal valResult
                             return (Just (currentEnv, maybeRedir))
                         Right (CmdExpr e) -> do
                             let vEnv = mkVEnv (reverse currentEnv)
-                            let normalizedResult = normalize vEnv e
+                            let valResult = evalHOAS vEnv e
+                            let normalizedResult = quote 0 valResult
                             let expandedAst = expand vEnv e
                             noColor <- liftIO $ lookupEnv "NO_COLOR"
                             let (lb, rb) = case (noColor, maybeRedir) of
