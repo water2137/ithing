@@ -6,6 +6,7 @@
 import System.Environment (getArgs, lookupEnv)
 import System.IO (hFlush, stdout, isEOF)
 import qualified Control.Exception as E
+import Control.Concurrent
 import System.IO.Error (isEOFError)
 import System.Console.Haskeline
 import System.Directory (setCurrentDirectory)
@@ -40,18 +41,19 @@ data C_CPU
 
 -- FFI Imports
 foreign import ccall "c_init" c_init :: IO (Ptr C_CPU)
+foreign import ccall "c_interrupt" c_interrupt :: Ptr C_CPU -> IO ()
 foreign import ccall "mk_var" mk_var :: CInt -> IO (Ptr ())
 foreign import ccall "mk_lam" mk_lam :: CInt -> Ptr () -> IO (Ptr ())
 foreign import ccall "mk_app" mk_app :: Ptr () -> Ptr () -> IO (Ptr ())
 foreign import ccall "c_register_global" c_register_global :: Ptr C_CPU -> CInt -> Ptr () -> IO ()
-foreign import ccall "c_eval" c_eval :: Ptr C_CPU -> Ptr () -> IO CLong
+foreign import ccall "safe c_eval" c_eval :: Ptr C_CPU -> Ptr () -> IO CLong
 foreign import ccall "c_get_tag" c_get_tag :: CLong -> IO CSize
 foreign import ccall "c_get_var_idx" c_get_var_idx :: CLong -> IO CInt
 foreign import ccall "c_get_app_f" c_get_app_f :: CLong -> IO CLong
 foreign import ccall "c_get_app_a" c_get_app_a :: CLong -> IO CLong
 foreign import ccall "c_get_lam_idx" c_get_lam_idx :: CLong -> IO CInt
-foreign import ccall "c_decode" c_decode :: Ptr C_CPU -> CLong -> IO CString
-foreign import ccall "c_quote" c_quote :: Ptr C_CPU -> CLong -> IO CString
+foreign import ccall "safe c_decode" c_decode :: Ptr C_CPU -> CLong -> IO CString
+foreign import ccall "safe c_quote" c_quote :: Ptr C_CPU -> CLong -> IO CString
 foreign import ccall "free" c_free :: Ptr a -> IO ()
 
 toCExpr :: Expr -> IO (Ptr ())
@@ -294,6 +296,11 @@ runREPL = do
     putStrLn introText
     runInputT defaultSettings $ withInterrupt $ loop cpu IM.empty Nothing
   where
+    evalWithInterrupt cpu act = do
+        mvar <- newEmptyMVar
+        tid <- forkIO $ (act >>= putMVar mvar) `E.catch` (\(e :: E.SomeException) -> return ())
+        takeMVar mvar `E.onException` (c_interrupt cpu >> killThread tid)
+
     loop cpu currentEnv maybeRedir = handleInterrupt (loop cpu currentEnv maybeRedir) $ do
         minput <- getInputLine "> "
         case minput of
@@ -367,18 +374,22 @@ runREPL = do
                             return (Just (currentEnv, maybeRedir))
                         Right (CmdChurch e) -> do
                             ce <- toCExpr e
-                            res <- c_eval cpu ce
-                            cstr <- c_decode cpu res
-                            out <- peekCString cstr
+                            out <- liftIO $ evalWithInterrupt cpu $ do
+                                res <- c_eval cpu ce
+                                cstr <- c_decode cpu res
+                                s <- peekCString cstr
+                                c_free cstr
+                                return s
                             putStrLn' out
-                            c_free cstr
                             return (Just (currentEnv, maybeRedir))
                         Right (CmdExpr e) -> do
                             ce <- toCExpr e
-                            res <- c_eval cpu ce
-                            cstr <- c_quote cpu res
-                            out <- peekCString cstr
-                            c_free cstr
+                            out <- liftIO $ evalWithInterrupt cpu $ do
+                                res <- c_eval cpu ce
+                                cstr <- c_quote cpu res
+                                s <- peekCString cstr
+                                c_free cstr
+                                return s
                             
                             noColor <- liftIO $ lookupEnv "NO_COLOR"
                             let (lb, rb) = case (noColor, maybeRedir) of

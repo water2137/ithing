@@ -78,6 +78,7 @@ typedef enum
 	IR_OP_LOAD_GLOBAL,
 	IR_OP_MAKE_LAM,
 	IR_OP_APPLY,
+	IR_OP_MAKE_THUNK,
 
 	/* Constants */
 	IR_MOV_IMM, /* Load Immediate */

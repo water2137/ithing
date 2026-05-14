@@ -126,6 +126,7 @@ static void x64_put_vreg_from_x64(x64_buf_t *b, ir_function_t *func, int vreg,
 extern Value force(cpu_t *cpu, Value v);
 extern Value jit_helper_make_lam(cpu_t *cpu, int lambda_idx, Env_t *env);
 extern Value jit_helper_apply(cpu_t *cpu, Value f, Value a);
+extern Value jit_helper_make_thunk(cpu_t *cpu, int lambda_idx, Env_t *env);
 
 static void x64_emit_host_call(x64_buf_t *b, ir_function_t *func,
 							   ir_instr_t *instr, void *helper)
@@ -270,6 +271,25 @@ static void *x86_64_compile(struct jit_context_s *ctx, ir_function_t *func)
 	x64_emit_rex(&b, 1, X64_RDI, X64_RBX);
 	x64_emit8(&b, 0x89);
 	x64_emit8(&b, 0xFB); /* mov rbx, rdi */
+
+	/* Check for interruption */
+	x64_emit8(&b, 0x83);
+	x64_emit8(&b, 0xBB);
+	x64_emit32(&b, CPU_OFFSET_INTERRUPTED);
+	x64_emit8(&b, 0x00); /* cmp dword [rbx + offset], 0 */
+	x64_emit8(&b, 0x74); /* je .not_interrupted */
+	uint8_t *patch_interrupted = b.ptr++;
+
+	/* Interrupted: return 0 */
+	x64_emit_rex(&b, 1, X64_RAX, X64_RAX);
+	x64_emit8(&b, 0x31);
+	x64_emit8(&b, 0xC0); /* xor rax, rax */
+	/* Epilogue (minimal since we haven't subbed rsp yet) */
+	x64_emit8(&b, 0x5B); /* pop rbx */
+	x64_emit8(&b, 0x5D); /* pop rbp */
+	x64_ret(&b);
+
+	*patch_interrupted = (uint8_t)(b.ptr - (patch_interrupted + 1));
 
 	stack_size = (func->vreg_count + 1) * 8;
 	stack_size = (stack_size + 15) & ~15;
@@ -428,6 +448,10 @@ static void *x86_64_compile(struct jit_context_s *ctx, ir_function_t *func)
 			case IR_OP_MAKE_LAM:
 				x64_emit_host_call(&b, func, instr,
 								   (void *)jit_helper_make_lam);
+				break;
+			case IR_OP_MAKE_THUNK:
+				x64_emit_host_call(&b, func, instr,
+								   (void *)jit_helper_make_thunk);
 				break;
 			case IR_OP_APPLY:
 				x64_emit_host_call(&b, func, instr, (void *)jit_helper_apply);

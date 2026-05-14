@@ -18,7 +18,8 @@ typedef enum
 	OP_LOAD_GLOBAL,
 	OP_MAKE_LAM,
 	OP_CALL,
-	OP_RET
+	OP_RET,
+	OP_MAKE_THUNK
 } opcode_t;
 
 typedef struct
@@ -91,6 +92,7 @@ typedef struct
 	Value result;
 	Expr_t *expr;
 	Env_t *env;
+	VLam_t *vlam;
 } VThunk_t;
 
 typedef struct cpu_s
@@ -105,6 +107,7 @@ typedef struct cpu_s
 	Env_t *env_arena;
 	int env_arena_cap;
 	int env_arena_used;
+	int interrupted;
 } cpu_t;
 
 #define STACK_PUSH(cpu, v) (cpu->stack[cpu->stack_top++] = (v))
@@ -112,6 +115,7 @@ typedef struct cpu_s
 
 /* FFI Exports */
 cpu_t *c_init();
+void c_interrupt(cpu_t *cpu);
 Expr_t *mk_var(int idx);
 Expr_t *mk_lam(int param_id, Expr_t *body);
 Expr_t *mk_app(Expr_t *f, Expr_t *a);
