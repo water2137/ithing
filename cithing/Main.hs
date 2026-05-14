@@ -263,8 +263,8 @@ subst x s (Lam y b)
     | otherwise = Lam y (subst x s b)
 subst x s (App f a) = App (subst x s f) (subst x s a)
 
-step :: [(Int, Expr)] -> Expr -> Maybe Expr
-step env (Var i) = lookup i env
+step :: IM.IntMap Expr -> Expr -> Maybe Expr
+step env (Var i) = IM.lookup i env
 step env (App f a) =
     case f of
         Lam x b -> Just (subst x a b)
@@ -273,12 +273,12 @@ step env (App f a) =
                 Nothing -> App f <$> step env a
 step env (Lam i b) = Lam i <$> step env b
 
-expand :: [(Int, Expr)] -> Expr -> Expr
+expand :: IM.IntMap Expr -> Expr -> Expr
 expand globalEnv expr = go Set.empty MS.empty expr
   where
     go visited localEnv (Var i) = case MS.lookup i localEnv of
         Just v -> v
-        Nothing -> case lookup i globalEnv of
+        Nothing -> case IM.lookup i globalEnv of
             Just v | not (Set.member i visited) -> go (Set.insert i visited) MS.empty v
             _ -> Var i
     go visited localEnv (Lam i b) =
@@ -292,7 +292,7 @@ runREPL :: IO ()
 runREPL = do
     cpu <- c_init
     putStrLn introText
-    runInputT defaultSettings $ withInterrupt $ loop cpu [] Nothing
+    runInputT defaultSettings $ withInterrupt $ loop cpu IM.empty Nothing
   where
     loop cpu currentEnv maybeRedir = handleInterrupt (loop cpu currentEnv maybeRedir) $ do
         minput <- getInputLine "> "
@@ -317,9 +317,9 @@ runREPL = do
                             putStrLn "stopped redirection"
                             return (Just (currentEnv, Nothing))
                         Right CmdShowDefs -> do
-                            if null currentEnv
+                            if IM.null currentEnv
                                 then putStrLn' "nothing defined"
-                                else mapM_ (\(i, expr) -> putStrLn' $ getInternedName i ++ " = " ++ show expr) (reverse currentEnv)
+                                else mapM_ (\(i, expr) -> putStrLn' $ getInternedName i ++ " = " ++ show expr) (IM.toList currentEnv)
                             return (Just (currentEnv, maybeRedir))
                         Right CmdShowLicense -> do
                             putStr' licenseText
@@ -332,7 +332,7 @@ runREPL = do
                             return (Just (currentEnv, maybeRedir))
                         Right CmdClear -> do
                             putStrLn' "cleared all definitions"
-                            return (Just ([], maybeRedir))
+                            return (Just (IM.empty, maybeRedir))
                         Right (CmdShell cmd) -> do
                             _ <- system cmd
                             return (Just (currentEnv, maybeRedir))
@@ -343,18 +343,19 @@ runREPL = do
                                 Right defs -> do
                                     mapM_ (\(i, e) -> toCExpr e >>= c_register_global cpu (fromIntegral i)) defs
                                     putStrLn' $ "loaded " ++ show (length defs) ++ " definitions from " ++ path
-                                    return (Just (reverse defs ++ currentEnv, maybeRedir))
+                                    return (Just (IM.union currentEnv (IM.fromList defs), maybeRedir))
                         Right CmdLoadStd -> do
                             case parse fileParser "stdlib" stdlib of
                                 Left err -> putStr (errorBundlePretty err) >> return (Just (currentEnv, maybeRedir))
                                 Right defs -> do
                                     mapM_ (\(i, e) -> toCExpr e >>= c_register_global cpu (fromIntegral i)) defs
                                     putStrLn' $ "loaded " ++ show (length defs) ++ " definitions from standard library"
-                                    return (Just (reverse defs ++ currentEnv, maybeRedir))
+                                    return (Just (IM.union currentEnv (IM.fromList defs), maybeRedir))
                         Right (CmdAssign i val) -> do
                             toCExpr val >>= c_register_global cpu (fromIntegral i)
                             putStrLn' $ "defined " ++ getInternedName i
-                            return (Just ((i, val) : currentEnv, maybeRedir))
+                            return (Just (IM.insert i val currentEnv, maybeRedir))
+
                         Right CmdNOP -> return (Just (currentEnv, maybeRedir))
                         Right (CmdDebug e) -> do
                             let loopSteps expr = do

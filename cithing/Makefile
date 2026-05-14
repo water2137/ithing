@@ -13,9 +13,12 @@ SRCS = $(CORE_SRCS) $(JIT_CORE_SRCS) $(JIT_ARCH_SRCS)
 OBJS = $(SRCS:.c=.o)
 TARGET = libcithing.a
 
-.PHONY: all clean haskell
+.PHONY: all clean haskell debug
 
 all: $(TARGET) haskell
+
+debug: CFLAGS += -DDEBUG
+debug: all
 
 $(TARGET): $(OBJS)
 	ar rcs $@ $(OBJS)

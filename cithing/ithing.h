@@ -2,7 +2,6 @@
 #define ITHING_H
 
 #include "tagging.h"
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -15,7 +14,8 @@ typedef uintptr_t Value;
 
 typedef enum
 {
-	OP_LOAD_VAR,
+	OP_LOAD_LOCAL,
+	OP_LOAD_GLOBAL,
 	OP_MAKE_LAM,
 	OP_CALL,
 	OP_RET
@@ -42,7 +42,6 @@ typedef struct
 
 typedef struct env_s
 {
-	int id;
 	Value val;
 	struct env_s *next;
 } Env_t;
@@ -100,7 +99,12 @@ typedef struct cpu_s
 	int stack_top;
 	void *jit_context;
 	Module_t *current_module;
-	Env_t *global_env;
+	Value *global_vals;
+	int global_size;
+	int global_cap;
+	Env_t *env_arena;
+	int env_arena_cap;
+	int env_arena_used;
 } cpu_t;
 
 #define STACK_PUSH(cpu, v) (cpu->stack[cpu->stack_top++] = (v))

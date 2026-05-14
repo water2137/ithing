@@ -88,7 +88,7 @@ ir_instr_t *ir_emit(ir_block_t *block, ir_opcode_t op, ir_reg_t dst,
 }
 
 ir_instr_t *ir_emit_imm(ir_block_t *block, ir_opcode_t op, ir_reg_t dst,
-						__uint128_t imm)
+						uint64_t imm)
 {
 	ir_instr_t *instr = ir_emit(block, op, dst, IR_REG_INVALID, IR_REG_INVALID);
 	instr->imm = imm;

@@ -36,12 +36,19 @@ ir_function_t *jit_translate_block(jit_context_t *jit, uintptr_t lambda_idx)
 		Instruction_t inst = lb->instructions[pc];
 		switch (inst.op)
 		{
-		case OP_LOAD_VAR:
+		case OP_LOAD_LOCAL:
 		{
 			ir_reg_t res = func->vreg_count++;
-			ir_emit_imm(block, IR_MOV_IMM, func->vreg_count, inst.arg);
-			ir_emit(block, IR_OP_LOAD_VAR, res, func->vreg_count, r_env);
-			func->vreg_count++;
+			ir_instr_t *instr =
+				ir_emit_imm(block, IR_OP_LOAD_LOCAL, res, inst.arg);
+			instr->src1 = r_env;
+			stack[sp++] = res;
+			break;
+		}
+		case OP_LOAD_GLOBAL:
+		{
+			ir_reg_t res = func->vreg_count++;
+			ir_emit_imm(block, IR_OP_LOAD_GLOBAL, res, inst.arg);
 			stack[sp++] = res;
 			break;
 		}

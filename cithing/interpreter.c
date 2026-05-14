@@ -34,23 +34,54 @@ Expr_t *mk_app(Expr_t *f, Expr_t *a)
 	return e;
 }
 
+static int lexical_stack[1024];
+static int lexical_depth = 0;
+
 int register_lambda(Module_t *mod, Expr_t *lam_expr)
 {
+	if (lam_expr->bytecode)
+	{
+		return (int)(uintptr_t)lam_expr->bytecode - 1;
+	}
+
 	int idx = mod->lambda_count++;
+	lam_expr->bytecode = (void *)(uintptr_t)(idx + 1);
+
 	mod->lambdas =
 		realloc(mod->lambdas, sizeof(LambdaBody_t) * mod->lambda_count);
 	mod->lambdas[idx].param_id = lam_expr->lam.param_id;
 	mod->lambdas[idx].instructions = malloc(sizeof(Instruction_t) * 1024);
 	mod->lambdas[idx].count = 0;
 
+	lexical_stack[lexical_depth++] = lam_expr->lam.param_id;
+
 	void emit(Expr_t * e)
 	{
 		switch (e->type)
 		{
 		case EXPR_VAR:
-			mod->lambdas[idx].instructions[mod->lambdas[idx].count++] =
-				(Instruction_t){OP_LOAD_VAR, e->var_idx};
+		{
+			int found = -1;
+			for (int i = 0; i < lexical_depth; i++)
+			{
+				if (lexical_stack[i] == e->var_idx)
+				{
+					found = lexical_depth - 1 - i;
+					break;
+				}
+			}
+			if (found != -1)
+			{
+				mod->lambdas[idx].instructions[mod->lambdas[idx].count++] =
+					(Instruction_t){OP_LOAD_LOCAL, found};
+			}
+			else
+			{
+				mod->lambdas[idx].instructions[mod->lambdas[idx].count++] =
+					(Instruction_t){OP_LOAD_GLOBAL, e->var_idx};
+			}
 			break;
+		}
 		case EXPR_APP:
 			emit(e->app.a);
 			emit(e->app.f);
@@ -67,6 +98,8 @@ int register_lambda(Module_t *mod, Expr_t *lam_expr)
 		}
 	}
 	emit(lam_expr->lam.body);
+	lexical_depth--;
+
 	mod->lambdas[idx].instructions[mod->lambdas[idx].count++] =
 		(Instruction_t){OP_RET, 0};
 #ifdef DEBUG
@@ -83,7 +116,12 @@ cpu_t *c_init()
 	cpu->stack = malloc(sizeof(Value) * 8192);
 	cpu->stack_top = 0;
 	cpu->current_module = calloc(1, sizeof(Module_t));
-	cpu->global_env = NULL;
+	cpu->global_cap = 1024;
+	cpu->global_vals = calloc(cpu->global_cap, sizeof(Value));
+	cpu->global_size = 0;
+	cpu->env_arena_cap = 1024 * 1024; /* Allocate 1M nodes at a time */
+	cpu->env_arena = malloc(sizeof(Env_t) * cpu->env_arena_cap);
+	cpu->env_arena_used = 0;
 	return cpu;
 }
 
@@ -92,13 +130,22 @@ void c_register_global(cpu_t *cpu, int id, Expr_t *expr)
 	VThunk_t *thunk = malloc(sizeof(VThunk_t));
 	thunk->result = 0;
 	thunk->expr = expr;
-	thunk->env = cpu->global_env;
+	thunk->env = NULL;
 
-	Env_t *new_node = malloc(sizeof(Env_t));
-	new_node->id = id;
-	new_node->val = (Value)TAG_PTR(thunk, TAG_THUNK);
-	new_node->next = cpu->global_env;
-	cpu->global_env = new_node;
+	if (id >= cpu->global_cap)
+	{
+		int old_cap = cpu->global_cap;
+		cpu->global_cap = (id + 1) * 2;
+		cpu->global_vals =
+			realloc(cpu->global_vals, sizeof(Value) * cpu->global_cap);
+		memset(cpu->global_vals + old_cap, 0,
+			   sizeof(Value) * (cpu->global_cap - old_cap));
+	}
+	cpu->global_vals[id] = (Value)TAG_PTR(thunk, TAG_THUNK);
+	if (id >= cpu->global_size)
+	{
+		cpu->global_size = id + 1;
+	}
 }
 
 Value c_eval(cpu_t *cpu, Expr_t *expr)
@@ -106,7 +153,7 @@ Value c_eval(cpu_t *cpu, Expr_t *expr)
 	int idx = register_lambda(
 		cpu->current_module,
 		&(Expr_t){.type = EXPR_LAM, .lam = {.param_id = -1, .body = expr}});
-	return vm_exec(cpu, idx, cpu->global_env);
+	return vm_exec(cpu, idx, NULL);
 }
 
 uintptr_t c_get_tag(Value v)
@@ -132,25 +179,30 @@ int c_get_lam_idx(Value v)
 
 Value jit_helper_load_var(cpu_t *cpu, int id, Env_t *env)
 {
-	Env_t *curr = env;
-	while (curr)
+	if (id >= 0)
 	{
-		if (curr->id == id)
+		// Local De Bruijn lookup
+		Env_t *curr = env;
+		while (id-- && curr)
 		{
-			return force(cpu, curr->val);
+			curr = curr->next;
 		}
-		curr = curr->next;
+		if (curr)
+		{
+			return curr->val;
+		}
 	}
-	curr = cpu->global_env;
-	while (curr)
+	else
 	{
-		if (curr->id == id)
+		// Global lookup (negative arg means global id)
+		int gid = -id - 1;
+		if (gid < cpu->global_size && cpu->global_vals[gid])
 		{
-			return force(cpu, curr->val);
+			return force(cpu, cpu->global_vals[gid]);
 		}
-		curr = curr->next;
+		return (Value)TAG_PTR(((uintptr_t)gid) << 3, TAG_VAR);
 	}
-	return (Value)TAG_PTR(((uintptr_t)id) << 3, TAG_VAR);
+	return (Value)TAG_PTR(((uintptr_t)0) << 3, TAG_VAR);
 }
 
 Value jit_helper_make_lam(cpu_t *cpu, int lambda_idx, Env_t *env)
@@ -160,18 +212,6 @@ Value jit_helper_make_lam(cpu_t *cpu, int lambda_idx, Env_t *env)
 	vlam->module = cpu->current_module;
 	vlam->env = env;
 	vlam->compiled_code = jit_get_block(cpu->jit_context, lambda_idx);
-
-	if (!vlam->compiled_code)
-	{
-		jit_context_t *jit = cpu->jit_context;
-		if (++jit->hotness[lambda_idx % 4096] > 50)
-		{
-			ir_function_t *func = jit_translate_block(jit, lambda_idx);
-			vlam->compiled_code = jit->backend->compile(jit, func);
-			jit_add_block(jit, lambda_idx, vlam->compiled_code);
-			ir_free_function(func);
-		}
-	}
 	return (Value)TAG_PTR(vlam, TAG_LAM);
 }
 
@@ -182,39 +222,94 @@ Value jit_helper_apply(cpu_t *cpu, Value f, Value a)
 
 Value vm_exec(cpu_t *cpu, int lambda_idx, Env_t *env)
 {
+	static void *dispatch_table[] = {&&do_load_local, &&do_load_global,
+									 &&do_make_lam, &&do_call, &&do_ret};
+
 	Instruction_t *instructions =
 		cpu->current_module->lambdas[lambda_idx].instructions;
-	int count = cpu->current_module->lambdas[lambda_idx].count;
 	int pc = 0;
+
 #ifdef DEBUG
-	printf("vm_exec lambda %d, instructions: %d\n", lambda_idx, count);
+	printf("vm_exec lambda %d\n", lambda_idx);
 #endif
-	while (pc < count)
+
+#define DISPATCH()                                                             \
+	do                                                                         \
+	{                                                                          \
+		uint8_t op = instructions[pc].op;                                      \
+		goto *dispatch_table[op];                                              \
+	} while (0)
+
+	DISPATCH();
+
+do_load_local:
+#ifdef DEBUG
+	printf("  executing op %d with arg %d\n", instructions[pc].op,
+		   instructions[pc].arg);
+#endif
 	{
-		Instruction_t inst = instructions[pc++];
-#ifdef DEBUG
-		printf("  executing op %d with arg %d\n", inst.op, inst.arg);
-#endif
-		switch (inst.op)
+		int depth = instructions[pc].arg;
+		Env_t *curr = env;
+		while (depth-- && curr)
 		{
-		case OP_LOAD_VAR:
-			STACK_PUSH(cpu, jit_helper_load_var(cpu, inst.arg, env));
-			break;
-		case OP_MAKE_LAM:
-			STACK_PUSH(cpu, jit_helper_make_lam(cpu, inst.arg, env));
-			break;
-		case OP_CALL:
-		{
-			Value f = STACK_POP(cpu);
-			Value a = STACK_POP(cpu);
-			STACK_PUSH(cpu, apply(cpu, f, a));
-			break;
+			curr = curr->next;
 		}
-		case OP_RET:
-			return STACK_POP(cpu);
-		}
+		STACK_PUSH(cpu, curr->val);
+		pc++;
+		DISPATCH();
 	}
-	return 0;
+
+do_load_global:
+#ifdef DEBUG
+	printf("  executing op %d with arg %d\n", instructions[pc].op,
+		   instructions[pc].arg);
+#endif
+	{
+		int arg = instructions[pc].arg;
+		Value res = 0;
+		if (arg < cpu->global_size && cpu->global_vals[arg])
+		{
+			res = force(cpu, cpu->global_vals[arg]);
+		}
+		if (!res)
+		{
+			res = (Value)TAG_PTR(((uintptr_t)arg) << 3, TAG_VAR);
+		}
+		STACK_PUSH(cpu, res);
+		pc++;
+		DISPATCH();
+	}
+
+do_make_lam:
+#ifdef DEBUG
+	printf("  executing op %d with arg %d\n", instructions[pc].op,
+		   instructions[pc].arg);
+#endif
+	{
+		STACK_PUSH(cpu, jit_helper_make_lam(cpu, instructions[pc].arg, env));
+		pc++;
+		DISPATCH();
+	}
+
+do_call:
+#ifdef DEBUG
+	printf("  executing op %d with arg %d\n", instructions[pc].op,
+		   instructions[pc].arg);
+#endif
+	{
+		Value f = STACK_POP(cpu);
+		Value a = STACK_POP(cpu);
+		STACK_PUSH(cpu, apply(cpu, f, a));
+		pc++;
+		DISPATCH();
+	}
+
+do_ret:
+#ifdef DEBUG
+	printf("  executing op %d with arg %d\n", instructions[pc].op,
+		   instructions[pc].arg);
+#endif
+	return STACK_POP(cpu);
 }
 
 Value apply(cpu_t *cpu, Value f, Value a)
@@ -223,10 +318,37 @@ Value apply(cpu_t *cpu, Value f, Value a)
 	if (GET_TAG(f) == TAG_LAM)
 	{
 		VLam_t *vlam = (VLam_t *)UNTAG_PTR(f);
-		Env_t *new_env = malloc(sizeof(Env_t));
-		new_env->id = vlam->module->lambdas[vlam->lambda_idx].param_id;
+		if (cpu->env_arena_used >= cpu->env_arena_cap)
+		{
+			cpu->env_arena_cap *= 2;
+			cpu->env_arena = malloc(sizeof(Env_t) * cpu->env_arena_cap);
+			cpu->env_arena_used = 0;
+		}
+		Env_t *new_env = &cpu->env_arena[cpu->env_arena_used++];
 		new_env->val = a;
 		new_env->next = vlam->env;
+
+		if (!vlam->compiled_code)
+		{
+			vlam->compiled_code =
+				jit_get_block(cpu->jit_context, vlam->lambda_idx);
+			if (!vlam->compiled_code)
+			{
+				jit_context_t *jit = cpu->jit_context;
+				if (++jit->hotness[vlam->lambda_idx % 4096] > 10)
+				{
+#ifdef DEBUG
+					printf("jit: compiling lambda %d\n", vlam->lambda_idx);
+#endif
+					ir_function_t *func =
+						jit_translate_block(jit, vlam->lambda_idx);
+					vlam->compiled_code = jit->backend->compile(jit, func);
+					jit_add_block(jit, vlam->lambda_idx, vlam->compiled_code);
+					ir_free_function(func);
+				}
+			}
+		}
+
 		if (vlam->compiled_code)
 		{
 			typedef Value (*jit_fn)(cpu_t *, Value, Env_t *);

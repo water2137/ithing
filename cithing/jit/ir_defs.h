@@ -6,7 +6,6 @@
 #ifndef X96_IR_DEFS_H
 #define X96_IR_DEFS_H
 
-#include <stdbool.h>
 #include <stdint.h>
 
 /* Virtual Registers */
@@ -75,7 +74,8 @@ typedef enum
 
 	/* Lambda Specific */
 	IR_GET_ARG,
-	IR_OP_LOAD_VAR,
+	IR_OP_LOAD_LOCAL,
+	IR_OP_LOAD_GLOBAL,
 	IR_OP_MAKE_LAM,
 	IR_OP_APPLY,
 
@@ -106,8 +106,8 @@ typedef struct ir_instr_s
 	ir_reg_t dst;
 	ir_reg_t src1;
 	ir_reg_t src2;
-	__uint128_t imm; /* For immediate variants */
-	char *asm_str;	 /* For inline asm */
+	uint64_t imm;  /* For immediate variants */
+	char *asm_str; /* For inline asm */
 	struct ir_instr_s *next;
 	struct ir_instr_s *prev;
 } ir_instr_t;
@@ -138,6 +138,6 @@ ir_block_t *ir_add_block(ir_function_t *func);
 ir_instr_t *ir_emit(ir_block_t *block, ir_opcode_t op, ir_reg_t dst,
 					ir_reg_t src1, ir_reg_t src2);
 ir_instr_t *ir_emit_imm(ir_block_t *block, ir_opcode_t op, ir_reg_t dst,
-						__uint128_t imm);
+						uint64_t imm);
 
 #endif /* X96_IR_DEFS_H */

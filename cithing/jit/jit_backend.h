@@ -18,7 +18,7 @@ typedef struct jit_backend_s
 	const char *name;
 
 	/* Initialize the backend */
-	bool (*init)(struct jit_context_s *ctx);
+	int (*init)(struct jit_context_s *ctx);
 
 	/* Clean up resources */
 	void (*destroy)(struct jit_context_s *ctx);

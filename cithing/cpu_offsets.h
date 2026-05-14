@@ -1,11 +1,11 @@
 #ifndef CPU_OFFSETS_H
 #define CPU_OFFSETS_H
 
-#include "ithing.h"
-#include <stddef.h>
-
-#define CPU_OFF_STACK offsetof(cpu_t, stack)
-#define CPU_OFF_STACK_PTR offsetof(cpu_t, stack_ptr)
-#define CPU_OFF_HEAP offsetof(cpu_t, heap)
+#define CPU_OFFSET_STACK 0
+#define CPU_OFFSET_STACK_TOP 8
+#define CPU_OFFSET_JIT_CONTEXT 16
+#define CPU_OFFSET_CURRENT_MODULE 24
+#define CPU_OFFSET_GLOBAL_VALS 32
+#define CPU_OFFSET_GLOBAL_SIZE 40
 
 #endif
